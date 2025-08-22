@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+scikit-learn
+joblib
+pydantic
+pytest
+httpx
+python-multipart
+pypdf
