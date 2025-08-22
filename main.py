@@ -1,68 +1,64 @@
-#!/usr/bin/env python
-import sys
-import warnings
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Dict, List
 
-from datetime import datetime
+from fastapi import FastAPI, File, Form, UploadFile
+from pydantic import BaseModel
 
-from real_estate.crew import RealEstate
+from rag.llm import LLM
+from rag.storage import ingest_docs, ingest_files, query_index
 
-warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
-
-# This main file is intended to be a way for you to run your
-# crew locally, so refrain from adding unnecessary logic into this file.
-# Replace with inputs you want to test with, it will automatically
-# interpolate any tasks and agents information
-
-def run():
-    """
-    Run the crew.
-    """
-    inputs = {
-        'topic': 'AI LLMs',
-        'current_year': str(datetime.now().year)
-    }
-    
-    try:
-        RealEstate().crew().kickoff(inputs=inputs)
-    except Exception as e:
-        raise Exception(f"An error occurred while running the crew: {e}")
+app = FastAPI()
+llm = LLM()
 
 
-def train():
-    """
-    Train the crew for a given number of iterations.
-    """
-    inputs = {
-        "topic": "AI LLMs",
-        'current_year': str(datetime.now().year)
-    }
-    try:
-        RealEstate().crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=inputs)
+@app.get("/healthz")
+def healthz() -> Dict[str, str]:
+    return {"status": "ok"}
 
-    except Exception as e:
-        raise Exception(f"An error occurred while training the crew: {e}")
 
-def replay():
-    """
-    Replay the crew execution from a specific task.
-    """
-    try:
-        RealEstate().crew().replay(task_id=sys.argv[1])
+class IngestJSONRequest(BaseModel):
+    client_id: str
+    docs: List[Dict[str, str]]
 
-    except Exception as e:
-        raise Exception(f"An error occurred while replaying the crew: {e}")
 
-def test():
-    """
-    Test the crew execution and returns the results.
-    """
-    inputs = {
-        "topic": "AI LLMs",
-        "current_year": str(datetime.now().year)
-    }
-    
-    try:
-        RealEstate().crew().test(n_iterations=int(sys.argv[1]), eval_llm=sys.argv[2], inputs=inputs)
+@app.post("/v1/ingest-json")
+def ingest_json(req: IngestJSONRequest) -> Dict[str, str]:
+    ingest_docs(req.client_id, req.docs)
+    return {"status": "ok"}
 
-    except Exception as e:
-        raise Exception(f"An error occurred while testing the crew: {e}")
+
+@app.post("/v1/ingest-files")
+async def ingest_files_endpoint(
+    client_id: str = Form(...),
+    files: List[UploadFile] = File(...),
+) -> Dict[str, str]:
+    paths: List[Path] = []
+    for file in files:
+        suffix = Path(file.filename).suffix
+        with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await file.read())
+            paths.append(Path(tmp.name))
+    ingest_files(client_id, paths)
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return {"status": "ok"}
+
+
+class AskRequest(BaseModel):
+    client_id: str
+    question: str
+
+
+@app.post("/v1/ask")
+def ask(req: AskRequest) -> Dict[str, object]:
+    snippets = query_index(req.client_id, req.question)
+    context = "\n".join(s["text"] for s in snippets)
+    answer = llm.generate(req.question, context)
+    return {"answer": answer, "citations": snippets}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
